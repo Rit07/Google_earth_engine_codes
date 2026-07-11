@@ -1,0 +1,260 @@
+// ============================================================
+// Distance from Rivers - Uttarakhand, India (2025)
+// Google Earth Engine Script
+// ============================================================
+
+// 1. Define Uttarakhand boundary
+var uttarakhand = ee.FeatureCollection('FAO/GAUL/2015/level1')
+  .filter(ee.Filter.eq('ADM1_NAME', 'Uttarakhand'));
+
+var geometry = uttarakhand.geometry();
+
+// 2. Load river data from HydroSHEDS / OSM via JRC
+// Using JRC Global Surface Water for river extraction (2021 latest)
+var jrcWater = ee.Image('JRC/GSW1_4/GlobalSurfaceWater');
+
+// Extract permanent/seasonal water occurrence (rivers, lakes)
+// Occurrence > 50% = fairly permanent water body
+var waterOccurrence = jrcWater.select('occurrence');
+
+// 3. Also load HydroSHEDS river network for vector-based distance
+var hydroRivers = ee.FeatureCollection('WWF/HydroSHEDS/v1/FreeFlowingRivers')
+  .filterBounds(geometry);
+
+// ============================================================
+// METHOD 1: Distance from Rivers using JRC Raster (pixel-based)
+// ============================================================
+
+// Create a binary river mask (occurrence > 30% = water)
+var riverMask = waterOccurrence.gt(30).clip(geometry);
+
+// Distance transform: compute distance from river pixels
+// ee.Image.distance() computes Euclidean distance in meters
+var distanceFromRiver_JRC = riverMask.not()
+  .cumulativeCost({
+    source: riverMask,
+    maxDistance: 50000
+  })
+  .rename('distance_from_river_m')
+  .clip(geometry);
+// ============================================================
+// METHOD 2: Distance from HydroSHEDS Vector Rivers (recommended)
+// ============================================================
+
+// Rasterize HydroSHEDS rivers at 30m resolution
+var hydroRiverRaster = hydroRivers
+  .map(function(f) { return f.set('river', 1); })
+  .reduceToImage(['river'], ee.Reducer.max())
+  .unmask(0)
+  .clip(geometry);
+
+// Distance from rasterized HydroSHEDS rivers
+var distanceFromRiver_Hydro = hydroRiverRaster.not()
+  .cumulativeCost({
+    source: hydroRiverRaster,
+    maxDistance: 50000  // max 50km
+  })
+  .rename('distance_from_river_hydro_m')
+  .clip(geometry);
+
+// ============================================================
+// METHOD 3: Fast Euclidean Distance (simpler, faster)
+// ============================================================
+
+// Using fastDistanceTransform on JRC raster
+var fastDist = riverMask
+  .fastDistanceTransform(256, 'pixels')  // 256 = kernel size
+  .sqrt()
+  .multiply(ee.Image.pixelArea().sqrt())  // convert pixels to meters approx
+  .rename('fast_distance_m')
+  .clip(geometry);
+
+// ============================================================
+// Visualization
+// ============================================================
+
+Map.centerObject(uttarakhand, 7);
+Map.addLayer(uttarakhand, {color: 'grey'}, 'Uttarakhand Boundary', true, 0.3);
+
+// River layer
+Map.addLayer(
+  riverMask.selfMask(),
+  {palette: ['0000FF']},
+  'JRC Rivers (occurrence > 30%)'
+);
+
+Map.addLayer(
+  hydroRivers,
+  {color: '00AAFF'},
+  'HydroSHEDS Free-Flowing Rivers'
+);
+
+// Distance visualization
+var distVis = {
+  min: 0,
+  max: 30000,  // 0 to 30 km
+  palette: ['00008B', '0000FF', '0099FF', '00FFFF', '99FF99', 'FFFF00', 'FF9900', 'FF0000']
+};
+
+Map.addLayer(distanceFromRiver_JRC, distVis, 'Distance from River - JRC (m)');
+Map.addLayer(distanceFromRiver_Hydro, distVis, 'Distance from River - HydroSHEDS (m)');
+
+// Distance classes layer
+var distClasses = distanceFromRiver_Hydro
+  .where(distanceFromRiver_Hydro.lte(500),   1)  // < 500m
+  .where(distanceFromRiver_Hydro.gt(500)
+    .and(distanceFromRiver_Hydro.lte(1000)),  2)  // 500m - 1km
+  .where(distanceFromRiver_Hydro.gt(1000)
+    .and(distanceFromRiver_Hydro.lte(5000)),  3)  // 1km - 5km
+  .where(distanceFromRiver_Hydro.gt(5000)
+    .and(distanceFromRiver_Hydro.lte(10000)), 4)  // 5km - 10km
+  .where(distanceFromRiver_Hydro.gt(10000),  5)   // > 10km
+  .rename('distance_class')
+  .clip(geometry);
+
+var classVis = {
+  min: 1, max: 5,
+  palette: ['00008B', '0099FF', '99FF99', 'FFFF00', 'FF0000']
+};
+
+Map.addLayer(distClasses, classVis, 'Distance Classes (1=<500m, 5=>10km)');
+
+// ============================================================
+// Add Legend
+// ============================================================
+
+var legend = ui.Panel({
+  style: {
+    position: 'bottom-left',
+    padding: '8px 15px',
+    backgroundColor: 'white'
+  }
+});
+
+legend.add(ui.Label({
+  value: 'Distance from Rivers',
+  style: {fontWeight: 'bold', fontSize: '14px', margin: '0 0 8px 0'}
+}));
+
+var legendColors = ['00008B', '0099FF', '99FF99', 'FFFF00', 'FF0000'];
+var legendLabels = ['< 500 m', '500 m - 1 km', '1 km - 5 km', '5 km - 10 km', '> 10 km'];
+
+for (var i = 0; i < legendColors.length; i++) {
+  var row = ui.Panel({layout: ui.Panel.Layout.flow('horizontal')});
+  row.add(ui.Label({
+    style: {
+      backgroundColor: '#' + legendColors[i],
+      padding: '8px',
+      margin: '0 8px 0 0'
+    }
+  }));
+  row.add(ui.Label(legendLabels[i]));
+  legend.add(row);
+}
+
+Map.add(legend);
+
+// ============================================================
+// Statistics: Area by distance class
+// ============================================================
+
+var areaImage = ee.Image.pixelArea().divide(1e6);  // km²
+
+var statsDict = areaImage.addBands(distClasses)
+  .reduceRegion({
+    reducer: ee.Reducer.sum().group({
+      groupField: 1,
+      groupName: 'class'
+    }),
+    geometry: geometry,
+    scale: 30,
+    maxPixels: 1e13,
+    bestEffort: true
+  });
+
+print('Area (km²) by Distance Class:', statsDict);
+print('Class Legend: 1=<500m, 2=500m-1km, 3=1-5km, 4=5-10km, 5=>10km');
+
+// ============================================================
+// EXPORT TO GOOGLE DRIVE
+// ============================================================
+
+// Export 1: Distance from rivers (HydroSHEDS) - continuous raster
+Export.image.toDrive({
+  image: distanceFromRiver_Hydro,
+  description: 'Uttarakhand_Distance_From_Rivers_HydroSHEDS_2025',
+  folder: 'GEE_Uttarakhand_2025',
+  fileNamePrefix: 'UK_Distance_Rivers_HydroSHEDS_30m',
+  region: geometry,
+  scale: 30,           // 30m resolution
+  crs: 'EPSG:4326',
+  maxPixels: 1e13,
+  fileFormat: 'GeoTIFF'
+});
+
+// Export 2: Distance from rivers (JRC) - continuous raster
+Export.image.toDrive({
+  image: distanceFromRiver_JRC,
+  description: 'Uttarakhand_Distance_From_Rivers_JRC_2025',
+  folder: 'GEE_Uttarakhand_2025',
+  fileNamePrefix: 'UK_Distance_Rivers_JRC_30m',
+  region: geometry,
+  scale: 30,
+  crs: 'EPSG:4326',
+  maxPixels: 1e13,
+  fileFormat: 'GeoTIFF'
+});
+
+// Export 3: Distance classes (classified raster)
+Export.image.toDrive({
+  image: distClasses.toByte(),
+  description: 'Uttarakhand_Distance_Classes_2025',
+  folder: 'GEE_Uttarakhand_2025',
+  fileNamePrefix: 'UK_Distance_Classes_30m',
+  region: geometry,
+  scale: 30,
+  crs: 'EPSG:4326',
+  maxPixels: 1e13,
+  fileFormat: 'GeoTIFF'
+});
+
+// Export 4: River mask (binary)
+Export.image.toDrive({
+  image: riverMask.toByte(),
+  description: 'Uttarakhand_River_Mask_JRC_2025',
+  folder: 'GEE_Uttarakhand_2025',
+  fileNamePrefix: 'UK_River_Mask_JRC_30m',
+  region: geometry,
+  scale: 30,
+  crs: 'EPSG:4326',
+  maxPixels: 1e13,
+  fileFormat: 'GeoTIFF'
+});
+
+// Export 5: HydroSHEDS rivers as vector (shapefile)
+Export.table.toDrive({
+  collection: hydroRivers,
+  description: 'Uttarakhand_HydroSHEDS_Rivers_Vector_2025',
+  folder: 'GEE_Uttarakhand_2025',
+  fileNamePrefix: 'UK_HydroSHEDS_Rivers',
+  fileFormat: 'SHP'  // or 'GeoJSON' or 'CSV'
+});
+
+// ============================================================
+// Optional: Export at higher resolution (100m) for faster processing
+// ============================================================
+
+Export.image.toDrive({
+  image: distanceFromRiver_Hydro,
+  description: 'Uttarakhand_Distance_Rivers_100m_2025',
+  folder: 'GEE_Uttarakhand_2025',
+  fileNamePrefix: 'UK_Distance_Rivers_HydroSHEDS_100m',
+  region: geometry,
+  scale: 100,         // 100m = faster, smaller file
+  crs: 'EPSG:4326',
+  maxPixels: 1e13,
+  fileFormat: 'GeoTIFF'
+});
+
+print('✅ All export tasks submitted! Check Tasks panel (top-right) to run them.');
+print('📁 Exports will be saved to Google Drive folder: GEE_Uttarakhand_2025');

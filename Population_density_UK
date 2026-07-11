@@ -1,0 +1,540 @@
+// ============================================================
+//  POPULATION DENSITY MAP — UTTARAKHAND, INDIA — 2025
+//  Datasets:
+//    1. WorldPop UN-adjusted (100m) — 2020 (latest available)
+//    2. GPW v4 (GHS) — Global Human Settlement Layer
+//    3. GHSL Built-up Surface — Settlement footprint
+//  Note: WorldPop 2025 projected using growth rate from 2015–2020
+// ============================================================
+
+// -----------------------------------------------------------
+// 1. Region of Interest — Uttarakhand
+// -----------------------------------------------------------
+var uttarakhand = ee.FeatureCollection("FAO/GAUL/2015/level1")
+  .filter(ee.Filter.eq('ADM1_NAME', 'Uttarakhand'));
+
+var geometry = uttarakhand.geometry();
+
+Map.centerObject(geometry, 8);
+Map.addLayer(uttarakhand, {color: '#333333'}, 'Uttarakhand Boundary');
+
+// -----------------------------------------------------------
+// 2. WorldPop Population Count — 100m resolution
+//    Latest available: 2020 (UN-adjusted)
+// -----------------------------------------------------------
+
+// 2020 Population
+var pop2020 = ee.ImageCollection("WorldPop/GP/100m/pop")
+  .filterBounds(geometry)
+  .filterDate('2020-01-01', '2020-12-31')
+  .select('population')
+  .first()
+  .clip(geometry);
+
+// 2015 Population (for growth rate calculation)
+var pop2015 = ee.ImageCollection("WorldPop/GP/100m/pop")
+  .filterBounds(geometry)
+  .filterDate('2015-01-01', '2015-12-31')
+  .select('population')
+  .first()
+  .clip(geometry);
+
+// -----------------------------------------------------------
+// 3. Project Population to 2025
+//    Using Compound Annual Growth Rate (CAGR)
+//    P_2025 = P_2020 × (1 + r)^5
+//    r = (P_2020 / P_2015)^(1/5) - 1
+// -----------------------------------------------------------
+var growthRate = pop2020.divide(pop2015.max(ee.Image(0.001)))
+  .pow(ee.Image(1.0 / 5.0))
+  .subtract(ee.Image(1.0));
+
+// Project to 2025 (5 years beyond 2020)
+var pop2025 = pop2020.multiply(
+  growthRate.add(ee.Image(1.0)).pow(ee.Image(5.0))
+).rename('population_2025').clip(geometry);
+
+print('Pop 2025 projected (min/max/mean):',
+  pop2025.reduceRegion({
+    reducer: ee.Reducer.minMax().combine(ee.Reducer.mean(), null, true),
+    geometry: geometry,
+    scale: 1000,
+    maxPixels: 1e10
+  })
+);
+
+// -----------------------------------------------------------
+// 4. Population DENSITY (people per km²)
+//    Pixel area at 100m = 0.01 km²
+//    Density = count / pixel_area_km2
+// -----------------------------------------------------------
+var pixelAreaKm2 = ee.Image.pixelArea().divide(1e6).clip(geometry); // m² → km²
+
+var popDensity2020 = pop2020.divide(pixelAreaKm2).rename('density_2020').clip(geometry);
+var popDensity2025 = pop2025.divide(pixelAreaKm2).rename('density_2025').clip(geometry);
+
+// Population change 2015 → 2025
+var popChange = pop2025.subtract(pop2015).rename('pop_change').clip(geometry);
+var popChangePct = pop2025.subtract(pop2015)
+  .divide(pop2015.max(ee.Image(0.001)))
+  .multiply(100)
+  .rename('pop_change_pct').clip(geometry);
+
+// -----------------------------------------------------------
+// 5. GHSL — Global Human Settlement Layer
+//    Built-up surface and population grid
+// -----------------------------------------------------------
+var ghslPop = ee.ImageCollection("JRC/GHSL/P2023A/GHS_POP")
+  .filterBounds(geometry)
+  .filterDate('2020-01-01', '2020-12-31')
+  .first()
+  .clip(geometry)
+  .rename('ghsl_population');
+
+var ghslBuiltUp = ee.ImageCollection("JRC/GHSL/P2023A/GHS_BUILT_S")
+  .filterBounds(geometry)
+  .filterDate('2020-01-01', '2020-12-31')
+  .first()
+  .clip(geometry)
+  .rename('built_up_m2');
+
+// GHSL Urban-Rural Classification
+var ghslSmod = ee.ImageCollection("JRC/GHSL/P2023A/GHS_SMOD")
+  .filterBounds(geometry)
+  .filterDate('2020-01-01', '2020-12-31')
+  .first()
+  .clip(geometry)
+  .rename('urban_rural_class');
+
+// -----------------------------------------------------------
+// 6. GPW v4 — Gridded Population of the World
+// -----------------------------------------------------------
+var gpw = ee.ImageCollection("CIESIN/GPWv411/GPW_Population_Density")
+  .filterBounds(geometry)
+  .filterDate('2020-01-01', '2020-12-31')
+  .first()
+  .select('unwpp-adjusted_population_density')
+  .clip(geometry)
+  .rename('gpw_density');
+
+// -----------------------------------------------------------
+// 7. Visualization Parameters
+// -----------------------------------------------------------
+
+// Population count palette
+var popVis = {
+  min: 0,
+  max: 500,
+  palette: [
+    '#ffffff',  // Empty / very low (white)
+    '#fff7bc',  // Very sparse (pale yellow)
+    '#fec44f',  // Sparse (yellow)
+    '#fe9929',  // Low-moderate (orange-yellow)
+    '#ec7014',  // Moderate (orange)
+    '#cc4c02',  // High (dark orange)
+    '#8c2d04',  // Very high (brown-red)
+    '#67000d'   // Extreme (deep red)
+  ]
+};
+
+// Population density palette (people/km²)
+var densityVis = {
+  min: 0,
+  max: 1000,
+  palette: [
+    '#f7fbff',  // < 10 (near empty)
+    '#deebf7',  // 10–50 (very sparse)
+    '#c6dbef',  // 50–100 (sparse)
+    '#9ecae1',  // 100–250 (low)
+    '#6baed6',  // 250–500 (moderate)
+    '#4292c6',  // 500–1000 (high)
+    '#2171b5',  // 1000–2500 (very high)
+    '#08519c',  // 2500–5000 (urban)
+    '#08306b'   // > 5000 (dense urban)
+  ]
+};
+
+// Change palette
+var changeVis = {
+  min: -100,
+  max: 100,
+  palette: ['#d73027','#fc8d59','#fee090','#ffffff','#e0f3f8','#91bfdb','#4575b4']
+};
+
+// SMOD urban-rural palette
+var smodVis = {
+  min: 10, max: 30,
+  palette: ['#1a9850','#91cf60','#d9ef8b','#fee08b','#fc8d59','#d73027']
+};
+
+// -----------------------------------------------------------
+// 8. Add Layers to Map
+// -----------------------------------------------------------
+
+// WorldPop
+Map.addLayer(popDensity2025, densityVis, 'Pop Density 2025 (people/km²) — WorldPop');
+Map.addLayer(popDensity2020, densityVis, 'Pop Density 2020 (people/km²) — WorldPop', false);
+Map.addLayer(pop2025,        popVis,     'Pop Count 2025 (projected) — WorldPop', false);
+Map.addLayer(pop2020,        popVis,     'Pop Count 2020 — WorldPop', false);
+Map.addLayer(pop2015,        popVis,     'Pop Count 2015 — WorldPop', false);
+
+// Change layers
+Map.addLayer(popChange,    {min:-500, max:500, palette:['#d73027','#ffffbf','#1a9850']},
+             'Population Change 2015–2025', false);
+Map.addLayer(popChangePct, changeVis, 'Population Change % 2015–2025', false);
+
+// GHSL
+Map.addLayer(ghslPop,     popVis,     'GHSL Population Count 2020', false);
+Map.addLayer(ghslBuiltUp, {min:0, max:10000, palette:['#ffffff','#f7f7f7','#d9d9d9','#737373','#252525']},
+             'GHSL Built-up Surface (m²)', false);
+Map.addLayer(ghslSmod, smodVis, 'GHSL Urban-Rural Classification', false);
+
+// GPW
+Map.addLayer(gpw, densityVis, 'GPW v4 Population Density 2020', false);
+
+// -----------------------------------------------------------
+// 9. Population Classification — Density Zones
+// -----------------------------------------------------------
+//  Class 1: Uninhabited      (0–10 people/km²)
+//  Class 2: Very Sparse      (10–50)
+//  Class 3: Sparse           (50–100)
+//  Class 4: Low Density      (100–250)
+//  Class 5: Moderate         (250–500)
+//  Class 6: High Density     (500–1000)
+//  Class 7: Very High        (1000–5000)
+//  Class 8: Urban Core       (> 5000)
+
+var densityClassified = ee.Image(0).clip(geometry)
+  .where(popDensity2025.lt(10),                                        1)
+  .where(popDensity2025.gte(10).and(popDensity2025.lt(50)),            2)
+  .where(popDensity2025.gte(50).and(popDensity2025.lt(100)),           3)
+  .where(popDensity2025.gte(100).and(popDensity2025.lt(250)),          4)
+  .where(popDensity2025.gte(250).and(popDensity2025.lt(500)),          5)
+  .where(popDensity2025.gte(500).and(popDensity2025.lt(1000)),         6)
+  .where(popDensity2025.gte(1000).and(popDensity2025.lt(5000)),        7)
+  .where(popDensity2025.gte(5000),                                     8)
+  .clip(geometry);
+
+var classVis = {
+  min: 1, max: 8,
+  palette: ['#f7fbff','#deebf7','#9ecae1','#4292c6','#2171b5','#08519c','#08306b','#03071e']
+};
+
+Map.addLayer(densityClassified, classVis, 'Population Density Classes 2025', false);
+
+// -----------------------------------------------------------
+// 10. District-wise Population Statistics
+// -----------------------------------------------------------
+var districts = ee.FeatureCollection("FAO/GAUL/2015/level2")
+  .filter(ee.Filter.eq('ADM1_NAME', 'Uttarakhand'));
+
+// Total population per district
+var districtPop = pop2025.reduceRegions({
+  collection: districts,
+  reducer: ee.Reducer.sum().combine({
+    reducer2: ee.Reducer.mean(),
+    sharedInputs: true
+  }),
+  scale: 100
+}).map(function(f) {
+  // Use ee.Algorithms.If to safely handle null values
+  var rawSum  = f.get('sum');
+  var rawMean = f.get('mean');
+  var totalPop = ee.Number(ee.Algorithms.If(
+    ee.Algorithms.IsEqual(rawSum, null), 0, rawSum
+  )).round();
+  var meanDens = ee.Number(ee.Algorithms.If(
+    ee.Algorithms.IsEqual(rawMean, null), 0, rawMean
+  )).round();
+  return f.set('total_pop_2025', totalPop)
+          .set('mean_density_per_pixel', meanDens);
+});
+
+// District density (total pop / district area km²)
+var districtStats = districtPop.map(function(f) {
+  var areaKm2  = f.geometry().area().divide(1e6);
+  var rawPop   = f.get('total_pop_2025');
+  var safePop  = ee.Number(ee.Algorithms.If(
+    ee.Algorithms.IsEqual(rawPop, null), 0, rawPop
+  ));
+  var density  = safePop.divide(areaKm2.max(ee.Number(0.001))).round();
+  return f.set('area_km2', areaKm2.round())
+          .set('density_per_km2', density);
+});
+
+print('District Population Statistics 2025:',
+  districtStats.select(['ADM2_NAME','total_pop_2025','density_per_km2','area_km2']));
+
+// -----------------------------------------------------------
+// 11. Total State Population — Uttarakhand 2025
+// -----------------------------------------------------------
+var totalPop2025 = pop2025.reduceRegion({
+  reducer: ee.Reducer.sum(),
+  geometry: geometry,
+  scale: 100,
+  maxPixels: 1e13
+});
+
+var totalPop2020 = pop2020.reduceRegion({
+  reducer: ee.Reducer.sum(),
+  geometry: geometry,
+  scale: 100,
+  maxPixels: 1e13
+});
+
+var totalPop2015 = pop2015.reduceRegion({
+  reducer: ee.Reducer.sum(),
+  geometry: geometry,
+  scale: 100,
+  maxPixels: 1e13
+});
+
+print('── Total Uttarakhand Population ──');
+print('2015:', totalPop2015);
+print('2020:', totalPop2020);
+print('2025 (projected):', totalPop2025);
+
+// -----------------------------------------------------------
+// 12. Urban Area Detection — GHSL SMOD Classes
+//    10 = Water
+//    11 = Very low density rural
+//    12 = Low density rural
+//    13 = Rural cluster
+//    21 = Suburban or peri-urban
+//    22 = Semi-dense urban cluster
+//    23 = Dense urban cluster
+//    30 = Urban centre
+// -----------------------------------------------------------
+var urbanMask    = ghslSmod.gte(21).selfMask().clip(geometry);
+var urbanCore    = ghslSmod.eq(30).selfMask().clip(geometry);
+var suburban     = ghslSmod.eq(21).or(ghslSmod.eq(22)).selfMask().clip(geometry);
+var rural        = ghslSmod.lte(13).and(ghslSmod.gte(11)).selfMask().clip(geometry);
+
+Map.addLayer(rural,    {palette: ['#74c476']}, 'Rural Areas (GHSL)', false);
+Map.addLayer(suburban, {palette: ['#fd8d3c']}, 'Suburban Areas (GHSL)', false);
+Map.addLayer(urbanCore,{palette: ['#de2d26']}, 'Urban Core (GHSL)', false);
+
+// Urban area km²
+var urbanAreaKm2 = urbanMask.multiply(ee.Image.pixelArea())
+  .divide(1e6)
+  .reduceRegion({
+    reducer: ee.Reducer.sum(),
+    geometry: geometry,
+    scale: 1000,
+    maxPixels: 1e13
+  });
+print('Urban Area (km²):', urbanAreaKm2);
+
+// -----------------------------------------------------------
+// 13. Time Series Chart — Population Growth
+// -----------------------------------------------------------
+var years = [2000, 2005, 2010, 2015, 2020];
+var popTimeSeries = ee.List(years).map(function(yr) {
+  yr = ee.Number(yr);
+  var col = ee.ImageCollection("WorldPop/GP/100m/pop")
+    .filterBounds(geometry)
+    .filterDate(
+      ee.Date.fromYMD(yr, 1, 1),
+      ee.Date.fromYMD(yr, 12, 31)
+    )
+    .select('population');
+  // Safely handle years where image may be unavailable
+  var img = ee.Image(ee.Algorithms.If(
+    col.size().gt(0),
+    col.first().clip(geometry),
+    ee.Image(0).rename('population').clip(geometry)
+  ));
+  var rawTotal = img.reduceRegion({
+    reducer: ee.Reducer.sum(),
+    geometry: geometry,
+    scale: 1000,
+    maxPixels: 1e13
+  }).get('population');
+  var safeTotal = ee.Number(ee.Algorithms.If(
+    ee.Algorithms.IsEqual(rawTotal, null), 0, rawTotal
+  ));
+  return ee.Feature(null, {'year': yr, 'population': safeTotal});
+});
+
+var popFC = ee.FeatureCollection(popTimeSeries);
+
+var popChart = ui.Chart.feature.byFeature(popFC, 'year', 'population')
+  .setChartType('LineChart')
+  .setOptions({
+    title: 'Population Growth Trend — Uttarakhand (2000–2020)',
+    vAxis: {title: 'Total Population'},
+    hAxis: {title: 'Year'},
+    lineWidth: 2,
+    pointSize: 5,
+    colors: ['#2171b5'],
+    series: {0: {labelInLegend: 'Population'}}
+  });
+print(popChart);
+
+// -----------------------------------------------------------
+// 14. District Population Bar Chart
+// -----------------------------------------------------------
+var districtChart = ui.Chart.feature.byFeature(
+  districtStats.sort('total_pop_2025', false),
+  'ADM2_NAME',
+  ['total_pop_2025', 'density_per_km2']
+).setChartType('ColumnChart')
+ .setOptions({
+   title: 'District-wise Population & Density — Uttarakhand 2025',
+   vAxis: {title: 'Value'},
+   hAxis: {title: 'District'},
+   series: {
+     0: {labelInLegend: 'Total Population 2025', color: '#2171b5'},
+     1: {labelInLegend: 'Density (per km²)',     color: '#fc8d59'}
+   },
+   bar: {groupWidth: '70%'}
+ });
+print(districtChart);
+
+// -----------------------------------------------------------
+// 15. Legend Panel
+// -----------------------------------------------------------
+var legend = ui.Panel({style: {position: 'bottom-left', padding: '8px 15px'}});
+legend.add(ui.Label({
+  value: 'Population Density Classes — Uttarakhand 2025',
+  style: {fontWeight: 'bold', fontSize: '13px', margin: '0 0 6px 0'}
+}));
+
+var classes = [
+  {color: '#f7fbff', label: '1: Uninhabited     (< 10/km²)'},
+  {color: '#deebf7', label: '2: Very Sparse     (10–50/km²)'},
+  {color: '#9ecae1', label: '3: Sparse          (50–100/km²)'},
+  {color: '#4292c6', label: '4: Low Density     (100–250/km²)'},
+  {color: '#2171b5', label: '5: Moderate        (250–500/km²)'},
+  {color: '#08519c', label: '6: High Density    (500–1000/km²)'},
+  {color: '#08306b', label: '7: Very High       (1000–5000/km²)'},
+  {color: '#03071e', label: '8: Urban Core      (> 5000/km²)'}
+];
+
+classes.forEach(function(c) {
+  var row = ui.Panel({layout: ui.Panel.Layout.flow('horizontal')});
+  row.add(ui.Label({style: {
+    backgroundColor: c.color, padding: '8px', margin: '4px',
+    border: '1px solid #aaa'
+  }}));
+  row.add(ui.Label({value: c.label,
+    style: {margin: '4px 0 4px 6px', fontSize: '11px'}}));
+  legend.add(row);
+});
+Map.add(legend);
+
+// -----------------------------------------------------------
+// 16. Export Options
+// -----------------------------------------------------------
+
+// Population Count 2025
+Export.image.toDrive({
+  image: pop2025,
+  description: 'Uttarakhand_PopCount_2025_Projected',
+  folder: 'GEE_Exports',
+  fileNamePrefix: 'Uttarakhand_PopCount_2025_Projected',
+  region: geometry,
+  scale: 100,
+  crs: 'EPSG:4326',
+  maxPixels: 1e13
+});
+
+// Population Density 2025
+Export.image.toDrive({
+  image: popDensity2025,
+  description: 'Uttarakhand_PopDensity_2025_per_km2',
+  folder: 'GEE_Exports',
+  fileNamePrefix: 'Uttarakhand_PopDensity_2025_per_km2',
+  region: geometry,
+  scale: 100,
+  crs: 'EPSG:4326',
+  maxPixels: 1e13
+});
+
+// Population Density Classification
+Export.image.toDrive({
+  image: densityClassified,
+  description: 'Uttarakhand_PopDensity_Classified_2025',
+  folder: 'GEE_Exports',
+  fileNamePrefix: 'Uttarakhand_PopDensity_Classified_2025',
+  region: geometry,
+  scale: 100,
+  crs: 'EPSG:4326',
+  maxPixels: 1e13
+});
+
+// Population Change 2015–2025
+Export.image.toDrive({
+  image: popChange,
+  description: 'Uttarakhand_PopChange_2015_2025',
+  folder: 'GEE_Exports',
+  fileNamePrefix: 'Uttarakhand_PopChange_2015_2025',
+  region: geometry,
+  scale: 100,
+  crs: 'EPSG:4326',
+  maxPixels: 1e13
+});
+
+// Population Change Percentage
+Export.image.toDrive({
+  image: popChangePct,
+  description: 'Uttarakhand_PopChangePct_2015_2025',
+  folder: 'GEE_Exports',
+  fileNamePrefix: 'Uttarakhand_PopChangePct_2015_2025',
+  region: geometry,
+  scale: 100,
+  crs: 'EPSG:4326',
+  maxPixels: 1e13
+});
+
+// GHSL Population
+Export.image.toDrive({
+  image: ghslPop,
+  description: 'Uttarakhand_GHSL_Population_2020',
+  folder: 'GEE_Exports',
+  fileNamePrefix: 'Uttarakhand_GHSL_Population_2020',
+  region: geometry,
+  scale: 100,
+  crs: 'EPSG:4326',
+  maxPixels: 1e13
+});
+
+// GHSL Urban-Rural Classification
+Export.image.toDrive({
+  image: ghslSmod,
+  description: 'Uttarakhand_GHSL_UrbanRural_2020',
+  folder: 'GEE_Exports',
+  fileNamePrefix: 'Uttarakhand_GHSL_UrbanRural_2020',
+  region: geometry,
+  scale: 1000,
+  crs: 'EPSG:4326',
+  maxPixels: 1e13
+});
+
+// District Statistics CSV
+Export.table.toDrive({
+  collection: districtStats.select(['ADM2_NAME','total_pop_2025','density_per_km2','area_km2']),
+  description: 'Uttarakhand_District_PopStats_2025',
+  folder: 'GEE_Exports',
+  fileNamePrefix: 'Uttarakhand_District_PopStats_2025',
+  fileFormat: 'CSV'
+});
+
+// Population Time Series CSV
+Export.table.toDrive({
+  collection: popFC,
+  description: 'Uttarakhand_Population_TimeSeries_2000_2020',
+  folder: 'GEE_Exports',
+  fileNamePrefix: 'Uttarakhand_Population_TimeSeries_2000_2020',
+  fileFormat: 'CSV'
+});
+
+print('==============================================');
+print('✅ Population Density Script Ready!');
+print('📊 3 Datasets: WorldPop + GHSL + GPW v4');
+print('🗺️  8 Density Classes + Urban/Rural Zones');
+print('📈 Time series chart: 2000–2020');
+print('📋 District stats: total pop + density');
+print('💾 Tasks tab → 9 exports ready to run');
+print('📂 Output folder: GEE_Exports');
+print('==============================================');

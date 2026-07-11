@@ -1,0 +1,228 @@
+// ============================================================
+// SRTM DEM Analysis for Uttarakhand, India
+// Google Earth Engine Code Editor
+// ============================================================
+
+// 1. Define Uttarakhand Boundary
+var uttarakhand = ee.FeatureCollection('FAO/GAUL/2015/level1')
+  .filter(ee.Filter.eq('ADM1_NAME', 'Uttarakhand'));
+
+// 2. Load SRTM DEM (30m resolution)
+var srtm = ee.Image('USGS/SRTMGL1_003');
+
+// 3. Clip DEM to Uttarakhand
+var dem = srtm.clip(uttarakhand);
+
+// 4. Compute Terrain Derivatives
+var terrain = ee.Terrain.products(dem);
+var slope    = terrain.select('slope');
+var aspect   = terrain.select('aspect');
+var hillshade = terrain.select('hillshade');
+
+// ============================================================
+// 5. Visualization Parameters
+// ============================================================
+
+var demVis = {
+  min: 200,
+  max: 7800,
+  palette: [
+    '#006633', // lowland green
+    '#88cc44', // foothills
+    '#ffdd00', // mid hills
+    '#ff8800', // high hills
+    '#cc4400', // alpine
+    '#ffffff'  // snow/glaciers
+  ]
+};
+
+var slopeVis = {
+  min: 0,
+  max: 60,
+  palette: ['#ffffcc', '#a1dab4', '#41b6c4', '#2c7fb8', '#253494']
+};
+
+var aspectVis = {
+  min: 0,
+  max: 360,
+  palette: ['#ff0000','#ffff00','#00ff00','#00ffff','#0000ff','#ff00ff','#ff0000']
+};
+
+var hillshadeVis = {
+  min: 0,
+  max: 255,
+  gamma: 1.3
+};
+
+// ============================================================
+// 6. Add Layers to Map
+// ============================================================
+
+Map.centerObject(uttarakhand, 8);
+
+// Base hillshade for context
+Map.addLayer(hillshade, hillshadeVis, 'Hillshade', true, 0.6);
+
+// DEM with transparency over hillshade
+Map.addLayer(dem, demVis, 'SRTM DEM (Elevation)', true, 0.8);
+
+// Slope
+Map.addLayer(slope, slopeVis, 'Slope (degrees)', false);
+
+// Aspect
+Map.addLayer(aspect, aspectVis, 'Aspect', false);
+
+// Uttarakhand boundary outline
+Map.addLayer(
+  ee.Image().byte().paint({featureCollection: uttarakhand, color: 1, width: 2}),
+  {palette: ['red']},
+  'Uttarakhand Boundary'
+);
+
+// ============================================================
+// 7. Elevation Statistics for Uttarakhand
+// ============================================================
+
+var stats = dem.reduceRegion({
+  reducer: ee.Reducer.mean()
+    .combine(ee.Reducer.min(), '', true)
+    .combine(ee.Reducer.max(), '', true)
+    .combine(ee.Reducer.stdDev(), '', true),
+  geometry: uttarakhand.geometry(),
+  scale: 30,
+  maxPixels: 1e10,
+  bestEffort: true
+});
+
+print('📊 Elevation Statistics (meters):', stats);
+
+// ============================================================
+// 8. Elevation Zone Classification
+// ============================================================
+
+var elevZones = dem
+  .where(dem.lt(500),                        1)  // Terai/Bhabar
+  .where(dem.gte(500).and(dem.lt(1500)),     2)  // Shiwalik/Lesser Himalaya
+  .where(dem.gte(1500).and(dem.lt(3500)),    3)  // Greater Himalaya
+  .where(dem.gte(3500).and(dem.lt(5000)),    4)  // Alpine Zone
+  .where(dem.gte(5000),                      5); // Nival/Glacial Zone
+
+var zoneVis = {
+  min: 1,
+  max: 5,
+  palette: ['#2ecc71', '#f39c12', '#e74c3c', '#9b59b6', '#ecf0f1']
+};
+
+Map.addLayer(elevZones.clip(uttarakhand), zoneVis, 'Elevation Zones', false);
+
+// 9. Elevation Zone Area Calculation
+var zoneNames = ['Terai/Bhabar (<500m)', 'Shiwalik/Lesser Himalaya (500-1500m)',
+                 'Greater Himalaya (1500-3500m)', 'Alpine (3500-5000m)', 'Nival/Glacial (>5000m)'];
+
+var zoneAreas = [1, 2, 3, 4, 5].map(function(z) {
+  var mask = elevZones.eq(z).clip(uttarakhand);
+  var area = mask.multiply(ee.Image.pixelArea()).reduceRegion({
+    reducer: ee.Reducer.sum(),
+    geometry: uttarakhand.geometry(),
+    scale: 30,
+    maxPixels: 1e10,
+    bestEffort: true
+  });
+  var areaKm2 = ee.Number(area.get('elevation')).divide(1e6);
+  return ee.Feature(null, {
+    'Zone': zoneNames[z - 1],
+    'Area_km2': areaKm2
+  });
+});
+
+print('🏔️ Elevation Zone Areas:', ee.FeatureCollection(zoneAreas));
+
+// ============================================================
+// 10. Contour Lines (optional, sampled)
+// ============================================================
+
+var contours = dem.convolve(ee.Kernel.gaussian(3, 1.5, 'pixels'))
+  .subtract(dem.convolve(ee.Kernel.gaussian(3, 1.5, 'pixels'))
+    .focal_mean(1, 'circle', 'pixels'));
+
+// Major contours at every 500m
+var contourInterval = 500;
+var contourLines = ee.Image([]).byte();
+
+for (var elev = 1000; elev <= 7000; elev += contourInterval) {
+  var contour = dem.gte(elev).and(dem.lt(elev + contourInterval)).selfMask();
+  contourLines = contourLines.blend(contour);
+}
+
+// ============================================================
+// 11. Legend Panel (UI)
+// ============================================================
+
+var legend = ui.Panel({
+  style: {
+    position: 'bottom-left',
+    padding: '8px 15px',
+    backgroundColor: 'rgba(255,255,255,0.9)'
+  }
+});
+
+legend.add(ui.Label({
+  value: '🏔️ Uttarakhand Elevation Zones',
+  style: {fontWeight: 'bold', fontSize: '14px', margin: '0 0 8px 0'}
+}));
+
+var zoneColors  = ['#2ecc71', '#f39c12', '#e74c3c', '#9b59b6', '#ecf0f1'];
+var zoneLabels  = [
+  'Terai/Bhabar   < 500 m',
+  'Lesser Himalaya  500–1500 m',
+  'Greater Himalaya 1500–3500 m',
+  'Alpine Zone     3500–5000 m',
+  'Nival / Glacial   > 5000 m'
+];
+
+zoneColors.forEach(function(color, i) {
+  var row = ui.Panel({layout: ui.Panel.Layout.flow('horizontal')});
+  row.add(ui.Label({
+    style: {
+      backgroundColor: color,
+      padding: '8px',
+      margin: '2px 6px 2px 0',
+      border: '1px solid #ccc'
+    }
+  }));
+  row.add(ui.Label({value: zoneLabels[i], style: {margin: '4px 0'}}));
+  legend.add(row);
+});
+
+Map.add(legend);
+
+// ============================================================
+// 12. Export DEM (optional)
+// ============================================================
+
+Export.image.toDrive({
+  image: dem,
+  description: 'Uttarakhand_SRTM_DEM_30m',
+  folder: 'GEE_Exports',
+  fileNamePrefix: 'Uttarakhand_SRTM_DEM',
+  region: uttarakhand.geometry(),
+  scale: 30,
+  crs: 'EPSG:4326',
+  maxPixels: 1e13,
+  fileFormat: 'GeoTIFF'
+});
+
+Export.image.toDrive({
+  image: slope,
+  description: 'Uttarakhand_Slope_30m',
+  folder: 'GEE_Exports',
+  fileNamePrefix: 'Uttarakhand_Slope',
+  region: uttarakhand.geometry(),
+  scale: 30,
+  crs: 'EPSG:4326',
+  maxPixels: 1e13,
+  fileFormat: 'GeoTIFF'
+});
+
+print('✅ Script loaded! Check layers panel and console for stats.');
+print('📁 Run Export tasks from the Tasks tab.');

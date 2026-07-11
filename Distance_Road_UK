@@ -1,0 +1,126 @@
+// ============================================================
+// Distance from Roads — Uttarakhand, India
+// Method: GRIP4 road density raster → binary → distance
+// ============================================================
+
+// ── 1. STUDY AREA ───────────────────────────────────────────
+var uttarakhand = ee.FeatureCollection("FAO/GAUL/2015/level1")
+  .filter(ee.Filter.eq('ADM1_NAME', 'Uttarakhand'));
+
+var districts = ee.FeatureCollection("FAO/GAUL/2015/level2")
+  .filter(ee.Filter.eq('ADM1_NAME', 'Uttarakhand'));
+
+Map.centerObject(uttarakhand, 8);
+
+// ── 2. ROAD PRESENCE RASTER (GRIP4 density → binary) ────────
+// GRIP4 road density: metres of road per km² grid cell (8km native res)
+// We threshold > 0 to get a binary road/no-road mask
+var grip4 = ee.Image("projects/sat-io/open-datasets/GRIP4/grip4_total_dens_m_km2")
+  .select('b1')
+  .clip(uttarakhand.geometry());
+
+var roadsRaster = grip4.gt(0).rename('roads');
+
+// ── 3. EUCLIDEAN DISTANCE (km) ──────────────────────────────
+var SCALE = 500; // Use 500m to match GRIP4's ~8km native resolution
+                 // Change to 30 for finer output (slower export)
+
+var distKm = roadsRaster
+  .fastDistanceTransform({ neighborhood: 512, units: 'pixels', metric: 'euclidean' })
+  .sqrt()
+  .multiply(SCALE)
+  .divide(1000)
+  .clip(uttarakhand.geometry())
+  .rename('dist_roads_km');
+
+// ── 4. CLASSIFIED ZONES ─────────────────────────────────────
+var distClass = ee.Image(0)
+  .where(distKm.lte(0.5),                    1)
+  .where(distKm.gt(0.5).and(distKm.lte(1)),  2)
+  .where(distKm.gt(1)  .and(distKm.lte(3)),  3)
+  .where(distKm.gt(3)  .and(distKm.lte(5)),  4)
+  .where(distKm.gt(5)  .and(distKm.lte(10)), 5)
+  .where(distKm.gt(10),                      6)
+  .clip(uttarakhand.geometry())
+  .rename('distance_class')
+  .toByte();
+
+// ── 5. VISUALISATION ────────────────────────────────────────
+Map.addLayer(
+  uttarakhand.style({ color:'#333333', fillColor:'00000000', width:2 }),
+  {}, 'Uttarakhand Boundary');
+
+Map.addLayer(
+  districts.style({ color:'#888888', fillColor:'00000000', width:1 }),
+  {}, 'Districts');
+
+Map.addLayer(distKm, {
+  min: 0, max: 15,
+  palette: ['#d73027','#f46d43','#fdae61','#fee08b','#a6d96a','#1a9850']
+}, 'Distance from Roads (km)', true);
+
+Map.addLayer(distClass, {
+  min: 1, max: 6,
+  palette: ['#d73027','#fc8d59','#fee08b','#91cf60','#4575b4','#313695']
+}, 'Distance Classes', false);
+
+Map.addLayer(roadsRaster.selfMask(), { palette: ['#000000'] }, 'Road Presence', false);
+
+// ── 6. STATISTICS ───────────────────────────────────────────
+print('Uttarakhand Road Distance Stats (km):',
+  distKm.reduceRegion({
+    reducer   : ee.Reducer.mean().combine(ee.Reducer.min(),'',true)
+                                 .combine(ee.Reducer.max(),'',true),
+    geometry  : uttarakhand.geometry(),
+    scale     : 1000,
+    maxPixels : 1e10,
+    bestEffort: true
+  })
+);
+
+var districtStats = distKm.reduceRegions({
+  collection: districts,
+  reducer   : ee.Reducer.mean().combine(ee.Reducer.max(),'',true)
+                               .combine(ee.Reducer.min(),'',true),
+  scale     : 1000,
+  tileScale : 4
+});
+print('Per-District Road Distance Stats:', districtStats);
+
+// ── 7. LEGEND ───────────────────────────────────────────────
+var legend = ui.Panel({ style: { position:'bottom-right', padding:'8px 15px' } });
+legend.add(ui.Label('Distance from Roads (km)', {
+  fontWeight:'bold', fontSize:'13px', margin:'0 0 6px 0'
+}));
+
+[['#d73027','0 – 2.5 km'],['#f46d43','2.5 – 5 km'],['#fdae61','5 – 7.5 km'],
+ ['#fee08b','7.5 – 10 km'],['#a6d96a','10 – 12.5 km'],['#1a9850','> 12.5 km']
+].forEach(function(item) {
+  var row = ui.Panel({ layout: ui.Panel.Layout.flow('horizontal') });
+  row.add(ui.Label('', { backgroundColor:item[0], padding:'8px', margin:'0 6px 4px 0' }));
+  row.add(ui.Label(item[1], { margin:'4px 0' }));
+  legend.add(row);
+});
+Map.add(legend);
+
+// ── 8. EXPORTS ──────────────────────────────────────────────
+Export.image.toDrive({
+  image          : distKm,
+  description    : 'Uttarakhand_Distance_Roads_km',
+  folder         : 'GEE_Exports',
+  fileNamePrefix : 'uttarakhand_dist_roads_km',
+  region         : uttarakhand.geometry(),
+  scale          : 500,
+  crs            : 'EPSG:4326',
+  maxPixels      : 1e13,
+  fileFormat     : 'GeoTIFF'
+});
+
+Export.table.toDrive({
+  collection     : districtStats,
+  description    : 'Uttarakhand_District_Road_Distance_Stats',
+  folder         : 'GEE_Exports',
+  fileNamePrefix : 'uttarakhand_district_road_stats',
+  fileFormat     : 'CSV',
+  selectors      : ['ADM2_NAME','mean','min','max']
+});

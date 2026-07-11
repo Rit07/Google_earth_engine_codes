@@ -1,0 +1,46 @@
+var dataset = ee.ImageCollection('LANDSAT/LC08/C01/T1_8DAY_NDVI')
+                  .filterDate('2015-01-01', '2019-12-31').filterBounds(table).map(function(image){return image.clip(table)});
+
+var colorized = dataset.select('NDVI');
+print(colorized)
+//var ndvi=colorized.reduce(ee.Reducer.mean());
+//print(ndvi)
+
+var colorizedlist = colorized.toList(colorized.size());
+
+var image1 = ee.Image(colorizedlist.get(0));
+
+print(image1.projection());
+
+var colorizedVis = {
+  min: -1.0,
+  max: 1.0,
+  palette: [
+    'FFFFFF', 'CE7E45', 'DF923D', 'F1B555', 'FCD163', '99B718', '74A901',
+    '66A000', '529400', '3E8601', '207401', '056201', '004C00', '023B01',
+    '012E01', '011D01', '011301'
+  ],
+};
+
+
+Export.image.toDrive({
+  image: image1,
+  description:'New_LANDSAT_NDVI_1',
+  folder: "NDVI",
+  scale:30,
+  maxPixels: 1e13,
+});
+
+
+print(image1);
+
+Map.setCenter(79, 30, 7);
+//Map.centerObject(colorized, 7);
+
+Map.addLayer(colorized, colorizedVis, 'Colorized');
+//Map.addLayer(table,{},'UK_Outr_GCS',true);
+
+
+//var batch = require('users/fitoprincipe/geetools:batch');
+
+//batch.Download.ImageCollection.toDrive(colorized,"Folder",{scale:30});

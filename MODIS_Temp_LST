@@ -1,0 +1,478 @@
+// ============================================================
+// MODIS Land Surface Temperature (LST) — Year 2025
+// Uttarakhand, India | Google Earth Engine Code Editor
+// ============================================================
+
+// ============================================================
+// 1. Define Uttarakhand Boundary
+// ============================================================
+
+var uttarakhand = ee.FeatureCollection('FAO/GAUL/2015/level1')
+  .filter(ee.Filter.eq('ADM1_NAME', 'Uttarakhand'));
+
+var geometry = uttarakhand.geometry();
+
+Map.centerObject(uttarakhand, 8);
+Map.setOptions('HYBRID'); // Satellite + Labels basemap
+
+// ============================================================
+// 2. Load MODIS LST — MOD11A2 (Terra, 8-day, 1km)
+//    2025 + baseline period (2015–2024) for anomaly
+// ============================================================
+
+// ---- 2025 Collection ----
+var modis2025 = ee.ImageCollection('MODIS/061/MOD11A2')
+  .filterDate('2025-01-01', '2025-12-31')
+  .filterBounds(geometry)
+  .select(['LST_Day_1km', 'LST_Night_1km', 'QC_Day', 'QC_Night']);
+
+// ---- Baseline Collection (2015–2024) for anomaly ----
+var modisBaseline = ee.ImageCollection('MODIS/061/MOD11A2')
+  .filterDate('2015-01-01', '2024-12-31')
+  .filterBounds(geometry)
+  .select(['LST_Day_1km', 'LST_Night_1km']);
+
+print('📦 MODIS 2025 Image Count:', modis2025.size());
+
+// ============================================================
+// 3. Convert DN → Celsius
+//    LST(K) = DN × 0.02   |   LST(°C) = LST(K) − 273.15
+// ============================================================
+
+function toCelsius(image) {
+  var day = image.select('LST_Day_1km')
+    .multiply(0.02).subtract(273.15)
+    .rename('LST_Day_C');
+  var night = image.select('LST_Night_1km')
+    .multiply(0.02).subtract(273.15)
+    .rename('LST_Night_C');
+  return image
+    .addBands([day, night])
+    .copyProperties(image, ['system:time_start']);
+}
+
+var lst2025     = modis2025.map(toCelsius);
+var lstBaseline = modisBaseline.map(toCelsius);
+
+// ============================================================
+// 4. Annual Composites (2025)
+// ============================================================
+
+var annualDay2025   = lst2025.select('LST_Day_C').mean().clip(uttarakhand);
+var annualNight2025 = lst2025.select('LST_Night_C').mean().clip(uttarakhand);
+var diurnalRange    = annualDay2025.subtract(annualNight2025).rename('Diurnal_Range');
+var baselineMeanDay = lstBaseline.select('LST_Day_C').mean().clip(uttarakhand);
+
+// ============================================================
+// 5. Monthly Composites — 2025
+// ============================================================
+
+var months     = ee.List.sequence(1, 12);
+var monthNames = ['Jan','Feb','Mar','Apr','May','Jun',
+                  'Jul','Aug','Sep','Oct','Nov','Dec'];
+
+var monthlyLST2025 = ee.ImageCollection(
+  months.map(function(m) {
+    var filtered = lst2025
+      .filter(ee.Filter.calendarRange(m, m, 'month'))
+      .select('LST_Day_C');
+    return filtered.mean()
+      .clip(uttarakhand)
+      .set('month', m)
+      .set('system:time_start', ee.Date.fromYMD(2025, m, 1).millis());
+  })
+);
+
+// ============================================================
+// 6. Seasonal Composites — 2025
+// ============================================================
+
+function seasonLST(col, m1, m2, name) {
+  return col
+    .filter(ee.Filter.calendarRange(m1, m2, 'month'))
+    .select('LST_Day_C')
+    .mean()
+    .clip(uttarakhand)
+    .rename('LST_' + name);
+}
+
+var lstWinter = seasonLST(lst2025, 1,  2,  'Winter_JF');   // Jan–Feb
+var lstPremonsoon = seasonLST(lst2025, 3,  5,  'PreMonsoon_MAM'); // Mar–May
+var lstMonsoon = seasonLST(lst2025, 6,  9,  'Monsoon_JJAS');   // Jun–Sep
+var lstPostmonsoon = seasonLST(lst2025, 10, 11, 'PostMonsoon_ON'); // Oct–Nov
+
+// ============================================================
+// 7. LST Anomaly — 2025 vs 2015–2024 Baseline
+// ============================================================
+
+var anomaly2025 = annualDay2025.subtract(baselineMeanDay)
+  .rename('LST_Anomaly_2025');
+
+// Monthly anomalies
+var baselineMonthly = months.map(function(m) {
+  return lstBaseline
+    .filter(ee.Filter.calendarRange(m, m, 'month'))
+    .select('LST_Day_C')
+    .mean()
+    .clip(uttarakhand)
+    .set('month', m);
+});
+
+// ============================================================
+// 8. Visualization Parameters
+// ============================================================
+
+var lstDayVis = {
+  min: -5,
+  max: 50,
+  palette: [
+    '#023858','#045a8d','#0570b0','#3690c0',
+    '#74a9cf','#a6bddb','#d0d1e6','#fff7fb',
+    '#ffffcc','#ffeda0','#fed976','#feb24c',
+    '#fd8d3c','#fc4e2a','#e31a1c','#bd0026','#800026'
+  ]
+};
+
+var lstNightVis = {
+  min: -15,
+  max: 20,
+  palette: [
+    '#0d0221','#0a1045','#1a237e','#283593',
+    '#3949ab','#5c6bc0','#7986cb','#9fa8da',
+    '#bbdefb','#e3f2fd'
+  ]
+};
+
+var diurnalVis = {
+  min: 0,
+  max: 35,
+  palette: ['#ffffcc','#c7e9b4','#7fcdbb','#41b6c4','#1d91c0','#225ea8','#0c2c84']
+};
+
+var anomalyVis = {
+  min: -6,
+  max: 6,
+  palette: [
+    '#2166ac','#4393c3','#92c5de','#d1e5f0',
+    '#f7f7f7',
+    '#fddbc7','#f4a582','#d6604d','#b2182b'
+  ]
+};
+
+var seasonVis = {
+  min: -5,
+  max: 50,
+  palette: [
+    '#313695','#4575b4','#74add1','#abd9e9',
+    '#e0f3f8','#ffffbf','#fee090','#fdae61',
+    '#f46d43','#d73027','#a50026'
+  ]
+};
+
+// ============================================================
+// 9. Add Map Layers
+// ============================================================
+
+// --- Annual ---
+Map.addLayer(annualDay2025,   lstDayVis,   '🌞 Annual Mean Day LST 2025 (°C)',   true);
+Map.addLayer(annualNight2025, lstNightVis, '🌙 Annual Mean Night LST 2025 (°C)', false);
+Map.addLayer(diurnalRange,    diurnalVis,  '🌡️ Diurnal Temperature Range 2025',  false);
+Map.addLayer(anomaly2025,     anomalyVis,  '⚠️ LST Anomaly 2025 vs 2015–2024',   false);
+
+// --- Seasonal ---
+Map.addLayer(lstWinter,       seasonVis, '❄️  Winter LST (Jan–Feb 2025)',        false);
+Map.addLayer(lstPremonsoon,   seasonVis, '🌸 Pre-Monsoon LST (Mar–May 2025)',    false);
+Map.addLayer(lstMonsoon,      seasonVis, '🌧️ Monsoon LST (Jun–Sep 2025)',        false);
+Map.addLayer(lstPostmonsoon,  seasonVis, '🍂 Post-Monsoon LST (Oct–Nov 2025)',   false);
+
+// --- Boundary ---
+Map.addLayer(
+  ee.Image().byte().paint({featureCollection: uttarakhand, color: 1, width: 2}),
+  {palette: ['#ffffff']},
+  '🗺️ Uttarakhand Boundary'
+);
+
+// ============================================================
+// 10. Time Series Chart — 8-day LST (Day & Night) 2025
+// ============================================================
+
+var timeSeriesChart = ui.Chart.image.series({
+  imageCollection: lst2025.select(['LST_Day_C', 'LST_Night_C']),
+  region: geometry,
+  reducer: ee.Reducer.mean(),
+  scale: 1000,
+  xProperty: 'system:time_start'
+})
+.setChartType('LineChart')
+.setOptions({
+  title: '📈 8-Day MODIS LST Time Series — Uttarakhand 2025',
+  hAxis: {
+    title: 'Date (2025)',
+    format: 'MMM dd',
+    gridlines: {color: '#f0f0f0'}
+  },
+  vAxis: {
+    title: 'Temperature (°C)',
+    gridlines: {color: '#f0f0f0'}
+  },
+  series: {
+    0: {color: '#e74c3c', lineWidth: 2.5, pointSize: 4, label: '☀️ Day LST'},
+    1: {color: '#2980b9', lineWidth: 2.5, pointSize: 4, label: '🌙 Night LST'}
+  },
+  legend: {position: 'bottom'},
+  backgroundColor: '#ffffff',
+  curveType: 'function',
+  chartArea: {width: '85%', height: '70%'}
+});
+
+print(timeSeriesChart);
+
+// ============================================================
+// 11. Monthly Bar Chart — Daytime LST 2025
+// ============================================================
+
+var monthlyChart = ui.Chart.image.series({
+  imageCollection: monthlyLST2025.select('LST_Day_C'),
+  region: geometry,
+  reducer: ee.Reducer.mean(),
+  scale: 1000,
+  xProperty: 'system:time_start'
+})
+.setChartType('ColumnChart')
+.setOptions({
+  title: '📊 Monthly Mean Daytime LST — Uttarakhand 2025',
+  hAxis: {
+    title: 'Month',
+    format: 'MMM',
+    gridlines: {color: 'transparent'}
+  },
+  vAxis: {
+    title: 'Mean LST (°C)',
+    minValue: -10,
+    gridlines: {color: '#f0f0f0'}
+  },
+  colors: ['#e74c3c'],
+  legend: {position: 'none'},
+  bar: {groupWidth: '70%'},
+  backgroundColor: '#ffffff',
+  chartArea: {width: '85%', height: '70%'}
+});
+
+print(monthlyChart);
+
+// ============================================================
+// 12. Seasonal Statistics Table
+// ============================================================
+
+var seasonalStats = ee.FeatureCollection([
+  ee.Feature(null, {Season: 'Winter (Jan-Feb)',       Band: 'LST_Winter_JF'}),
+  ee.Feature(null, {Season: 'Pre-Monsoon (Mar-May)',  Band: 'LST_PreMonsoon_MAM'}),
+  ee.Feature(null, {Season: 'Monsoon (Jun-Sep)',      Band: 'LST_Monsoon_JJAS'}),
+  ee.Feature(null, {Season: 'Post-Monsoon (Oct-Nov)', Band: 'LST_PostMonsoon_ON'})
+]);
+
+var seasonImages = [lstWinter, lstPremonsoon, lstMonsoon, lstPostmonsoon];
+var seasonLabels = ['Winter (Jan-Feb)', 'Pre-Monsoon (Mar-May)', 
+                    'Monsoon (Jun-Sep)', 'Post-Monsoon (Oct-Nov)'];
+
+seasonImages.forEach(function(img, i) {
+  var stats = img.reduceRegion({
+    reducer: ee.Reducer.mean()
+      .combine(ee.Reducer.min(), '', true)
+      .combine(ee.Reducer.max(), '', true),
+    geometry: geometry,
+    scale: 1000,
+    maxPixels: 1e10,
+    bestEffort: true
+  });
+  print('🌡️ LST Stats — ' + seasonLabels[i] + ':', stats);
+});
+
+// ============================================================
+// 13. Annual Statistics
+// ============================================================
+
+var annualStats = annualDay2025.reduceRegion({
+  reducer: ee.Reducer.mean()
+    .combine(ee.Reducer.min(),    '', true)
+    .combine(ee.Reducer.max(),    '', true)
+    .combine(ee.Reducer.stdDev(), '', true)
+    .combine(ee.Reducer.percentile([25, 50, 75]), '', true),
+  geometry: geometry,
+  scale: 1000,
+  maxPixels: 1e10,
+  bestEffort: true
+});
+
+print('📊 Annual Daytime LST Statistics 2025 (°C):', annualStats);
+
+var anomalyStats = anomaly2025.reduceRegion({
+  reducer: ee.Reducer.mean()
+    .combine(ee.Reducer.min(), '', true)
+    .combine(ee.Reducer.max(), '', true),
+  geometry: geometry,
+  scale: 1000,
+  maxPixels: 1e10,
+  bestEffort: true
+});
+
+print('⚠️ LST Anomaly 2025 vs Baseline (°C):', anomalyStats);
+
+// ============================================================
+// 14. Hot Spot Detection — Pixels > 40°C (Day LST)
+// ============================================================
+
+var hotSpots = annualDay2025.gt(40).selfMask();
+
+Map.addLayer(
+  hotSpots,
+  {palette: ['#ff0000']},
+  '🔴 Hot Spots (Annual Mean > 40°C)',
+  false
+);
+
+var hotSpotArea = hotSpots.multiply(ee.Image.pixelArea())
+  .reduceRegion({
+    reducer: ee.Reducer.sum(),
+    geometry: geometry,
+    scale: 1000,
+    maxPixels: 1e10,
+    bestEffort: true
+  });
+
+print('🔴 Hot Spot Area (Mean Day LST > 40°C):', 
+  ee.Number(hotSpotArea.get('LST_Day_C')).divide(1e6).round(), 'km²');
+
+// Cold Spots < 0°C
+var coldSpots = annualDay2025.lt(0).selfMask();
+
+Map.addLayer(
+  coldSpots,
+  {palette: ['#0000ff']},
+  '🔵 Cold Spots (Annual Mean < 0°C)',
+  false
+);
+
+// ============================================================
+// 15. Legend UI Panel
+// ============================================================
+
+var legend = ui.Panel({
+  style: {
+    position: 'bottom-left',
+    padding: '10px 14px',
+    backgroundColor: 'rgba(255,255,255,0.92)',
+    border: '1px solid #ccc'
+  }
+});
+
+legend.add(ui.Label({
+  value: '🌡️ MODIS Day LST 2025 (°C)',
+  style: {fontWeight: 'bold', fontSize: '13px', margin: '0 0 6px 0'}
+}));
+
+// Gradient bar
+var makeGradientBar = function(palette, min, max) {
+  var bar = ui.Thumbnail({
+    image: ee.Image.pixelLonLat().select('longitude'),
+    params: {
+      bbox: [0, 0, 1, 0.1],
+      dimensions: '200x20',
+      format: 'png',
+      min: 0, max: 1,
+      palette: palette
+    },
+    style: {stretch: 'horizontal', margin: '4px 0', maxHeight: '24px'}
+  });
+  var labels = ui.Panel({
+    widgets: [
+      ui.Label(min + '°C', {margin: '0', fontSize: '11px'}),
+      ui.Label(max + '°C', {margin: '0 0 0 150px', fontSize: '11px'})
+    ],
+    layout: ui.Panel.Layout.flow('horizontal')
+  });
+  return ui.Panel([bar, labels]);
+};
+
+legend.add(makeGradientBar(lstDayVis.palette, '-5', '50'));
+
+legend.add(ui.Label({
+  value: '🔴 Hot Spots > 40°C  |  🔵 Cold Spots < 0°C',
+  style: {fontSize: '11px', margin: '6px 0 0 0', color: '#555'}
+}));
+
+legend.add(ui.Label({
+  value: '⚠️ Anomaly: Blue = Cooler | Red = Warmer than baseline',
+  style: {fontSize: '11px', margin: '4px 0 0 0', color: '#555'}
+}));
+
+Map.add(legend);
+
+// ============================================================
+// 16. Export Options
+// ============================================================
+
+// Annual Mean Day LST
+Export.image.toDrive({
+  image: annualDay2025,
+  description: 'Uttarakhand_LST_Day_Annual_2025',
+  folder: 'GEE_LST_2025',
+  fileNamePrefix: 'LST_Day_Annual_2025',
+  region: geometry,
+  scale: 1000,
+  crs: 'EPSG:4326',
+  maxPixels: 1e13,
+  fileFormat: 'GeoTIFF'
+});
+
+// Annual Mean Night LST
+Export.image.toDrive({
+  image: annualNight2025,
+  description: 'Uttarakhand_LST_Night_Annual_2025',
+  folder: 'GEE_LST_2025',
+  fileNamePrefix: 'LST_Night_Annual_2025',
+  region: geometry,
+  scale: 1000,
+  crs: 'EPSG:4326',
+  maxPixels: 1e13,
+  fileFormat: 'GeoTIFF'
+});
+
+// LST Anomaly
+Export.image.toDrive({
+  image: anomaly2025,
+  description: 'Uttarakhand_LST_Anomaly_2025_vs_Baseline',
+  folder: 'GEE_LST_2025',
+  fileNamePrefix: 'LST_Anomaly_2025',
+  region: geometry,
+  scale: 1000,
+  crs: 'EPSG:4326',
+  maxPixels: 1e13,
+  fileFormat: 'GeoTIFF'
+});
+
+// Seasonal Exports
+var seasonExports = [
+  {img: lstWinter,       name: 'LST_Winter_JanFeb_2025'},
+  {img: lstPremonsoon,   name: 'LST_PreMonsoon_MarMay_2025'},
+  {img: lstMonsoon,      name: 'LST_Monsoon_JunSep_2025'},
+  {img: lstPostmonsoon,  name: 'LST_PostMonsoon_OctNov_2025'}
+];
+
+seasonExports.forEach(function(s) {
+  Export.image.toDrive({
+    image: s.img,
+    description: 'Uttarakhand_' + s.name,
+    folder: 'GEE_LST_2025',
+    fileNamePrefix: s.name,
+    region: geometry,
+    scale: 1000,
+    crs: 'EPSG:4326',
+    maxPixels: 1e13,
+    fileFormat: 'GeoTIFF'
+  });
+});
+
+print('✅ Script Loaded Successfully!');
+print('📁 Go to Tasks tab → Run exports to Google Drive');
+print('📊 Check Console for statistics and charts');

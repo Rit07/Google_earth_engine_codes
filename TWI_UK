@@ -1,0 +1,156 @@
+// ============================================================
+// Topographic Wetness Index (TWI) for Uttarakhand, India
+// TWI = ln(As / tan(slope))
+// Data: SRTM DEM (30m resolution)
+// Author: GEE Script | Year: 2025
+// ============================================================
+
+// 1. Define Uttarakhand boundary
+var uttarakhand = ee.FeatureCollection('FAO/GAUL/2015/level1')
+  .filter(ee.Filter.eq('ADM1_NAME', 'Uttarakhand'));
+
+Map.centerObject(uttarakhand, 8);
+
+// 2. Load SRTM DEM (30m)
+var dem = ee.Image('USGS/SRTMGL1_003')
+  .clip(uttarakhand);
+
+// 3. Compute Slope (in degrees, then convert to radians)
+var slopeRad = ee.Terrain.slope(dem)
+  .multiply(Math.PI / 180);  // degrees → radians
+
+// 4. Specific Catchment Area (SCA) approximation
+var pixelArea = ee.Image.pixelArea();  // m²
+var epsilon = 0.001;  // avoid division by zero for flat areas
+var sinSlope = slopeRad.sin().max(epsilon);
+var sca = pixelArea.divide(sinSlope);  // m²/m = m
+
+// 5. Compute TWI
+// TWI = ln(As / tan(slope))
+var tanSlope = slopeRad.tan().max(epsilon);
+var twi = sca.divide(tanSlope).log()
+  .rename('TWI')
+  .clip(uttarakhand);
+
+// 6. Visualization parameters
+var twiVis = {
+  min: 0,
+  max: 20,
+  palette: [
+    '#d73027', '#f46d43', '#fdae61', '#fee090', '#ffffbf',
+    '#e0f3f8', '#abd9e9', '#74add1', '#4575b4', '#313695'
+  ]
+};
+
+// 7. Add layers to map
+Map.addLayer(dem, {min: 100, max: 7000, palette: ['#f5f5dc','#8B4513','white']}, 
+  'DEM - Uttarakhand', false);
+
+Map.addLayer(twi, twiVis, 'TWI - Uttarakhand 2025');
+
+Map.addLayer(uttarakhand.style({color: 'black', fillColor: '00000000', width: 2}), 
+  {}, 'Uttarakhand Boundary');
+
+var slopeDeg = ee.Terrain.slope(dem);
+Map.addLayer(slopeDeg, {min: 0, max: 60, palette: ['white','yellow','orange','red','darkred']}, 
+  'Slope (degrees)', false);
+
+// 8. Statistics
+var twiStats = twi.reduceRegion({
+  reducer: ee.Reducer.percentile([10, 25, 50, 75, 90])
+    .combine(ee.Reducer.mean(), '', true)
+    .combine(ee.Reducer.minMax(), '', true),
+  geometry: uttarakhand.geometry(),
+  scale: 500,
+  maxPixels: 1e10,
+  bestEffort: true
+});
+print('TWI Statistics for Uttarakhand:', twiStats);
+
+// 9. Classify TWI into wetness zones
+var twiClassified = ee.Image(0)
+  .where(twi.lt(5),  1)
+  .where(twi.gte(5).and(twi.lt(8)),  2)
+  .where(twi.gte(8).and(twi.lt(11)), 3)
+  .where(twi.gte(11).and(twi.lt(14)), 4)
+  .where(twi.gte(14), 5)
+  .clip(uttarakhand)
+  .rename('TWI_Class');
+
+var classVis = {
+  min: 1, max: 5,
+  palette: ['#d73027', '#fc8d59', '#ffffbf', '#91bfdb', '#4575b4']
+};
+Map.addLayer(twiClassified, classVis, 'TWI Classified (5 zones)', false);
+
+// 10. Legend panel
+var legend = ui.Panel({
+  style: {
+    position: 'bottom-left',
+    padding: '8px 15px',
+    backgroundColor: 'white'
+  }
+});
+
+var legendTitle = ui.Label({
+  value: 'TWI - Uttarakhand',
+  style: {fontWeight: 'bold', fontSize: '14px', margin: '0 0 6px 0'}
+});
+legend.add(legendTitle);
+
+var legendDesc = ui.Label({
+  value: 'Topographic Wetness Index\n(SRTM 30m | 2025)',
+  style: {fontSize: '11px', color: 'gray', margin: '0 0 8px 0', whiteSpace: 'pre'}
+});
+legend.add(legendDesc);
+
+var palette = twiVis.palette;
+var labels = ['Low (0) - Dry/Steep', '', '', '', '', '', '', '', '', 'High (20) - Wet/Flat'];
+palette.forEach(function(color, i) {
+  var row = ui.Panel({layout: ui.Panel.Layout.flow('horizontal')});
+  var colorBox = ui.Label({
+    style: {backgroundColor: color, padding: '8px', margin: '0 4px 2px 0', border: '1px solid #ccc'}
+  });
+  var label = ui.Label({
+    value: labels[i],
+    style: {fontSize: '10px', margin: '0', color: '#333'}
+  });
+  row.add(colorBox);
+  row.add(label);
+  legend.add(row);
+});
+Map.add(legend);
+
+// ============================================================
+// 11. EXPORT TO GOOGLE DRIVE
+// ============================================================
+
+// Export TWI (continuous values)
+Export.image.toDrive({
+  image: twi,
+  description: 'TWI_Uttarakhand_2025_SRTM30m',
+  folder: 'GEE_Exports',
+  fileNamePrefix: 'TWI_Uttarakhand_2025',
+  region: uttarakhand.geometry(),
+  scale: 30,
+  crs: 'EPSG:4326',
+  maxPixels: 1e13,
+  fileFormat: 'GeoTIFF'
+});
+
+// Export TWI Classified (5 wetness zones)
+Export.image.toDrive({
+  image: twiClassified,
+  description: 'TWI_Classified_Uttarakhand_2025',
+  folder: 'GEE_Exports',
+  fileNamePrefix: 'TWI_Classified_Uttarakhand_2025',
+  region: uttarakhand.geometry(),
+  scale: 30,
+  crs: 'EPSG:4326',
+  maxPixels: 1e13,
+  fileFormat: 'GeoTIFF'
+});
+
+print('✅ Export tasks submitted!');
+print('Go to Tasks tab (top-right) → Click RUN on each task to start export.');
+print('Files will appear in Google Drive → GEE_Exports folder.');
